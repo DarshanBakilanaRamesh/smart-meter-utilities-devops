@@ -1,0 +1,16 @@
+{
+  "control_record": {
+    "document_number": "000000012345",
+    "message_type": "Z_METER_READING",
+    "sender": "SMART_METER_PLATFORM",
+    "receiver": "UTILITY_SYSTEM"
+  },
+  "segments": [
+    {
+      "segment_type": "ZMETER",
+      "meter_id": "MTR-1001",
+      "reading": 12900,
+      "reading_date": "2026-07-25"
+    }
+  ]
+}
