@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from app import models, schemas
 
@@ -10,7 +12,66 @@ VAT_RATE = Decimal("0.19")
 HIGH_CONSUMPTION_LIMIT = Decimal("5000")
 
 
-def add_reading(db: Session, payload: schemas.ReadingCreate) -> models.MeterReading:
+def simulation_today():
+    return datetime.now(timezone.utc).date()
+
+
+def switch_supplier(db: Session, payload: schemas.SupplierSwitchCreate) -> models.SupplierSwitch:
+    try:
+        if db.get(models.SupplierSwitch, payload.request_id):
+            raise HTTPException(409, "Supplier-switch request ID already exists")
+
+        customer = db.get(models.Customer, payload.customer_id)
+        meter = db.get(models.Meter, payload.meter_id)
+        reason = None
+        if customer is None:
+            reason = "Customer does not exist"
+        elif meter is None:
+            reason = "Meter does not exist"
+        elif meter.customer_id != payload.customer_id:
+            reason = "Meter does not belong to customer"
+        elif meter.status != "ACTIVE":
+            reason = "Meter is not active"
+        elif payload.old_supplier != meter.current_supplier:
+            reason = "Old supplier does not match current supplier"
+        elif payload.new_supplier == payload.old_supplier:
+            reason = "New supplier must differ from old supplier"
+        elif payload.requested_date != simulation_today():
+            reason = "Requested date must be today (UTC) in this simulation"
+
+        if reason is None:
+            # Compare and update together so a concurrent change is not overwritten.
+            result = db.execute(
+                update(models.Meter).where(
+                    models.Meter.id == payload.meter_id,
+                    models.Meter.customer_id == payload.customer_id,
+                    models.Meter.status == "ACTIVE",
+                    models.Meter.current_supplier == payload.old_supplier,
+                ).values(current_supplier=payload.new_supplier)
+            )
+            if result.rowcount != 1:
+                reason = "Meter changed during processing; submit a new request"
+
+        request = models.SupplierSwitch(
+            **payload.model_dump(), status="REJECTED" if reason else "COMPLETED",
+            rejection_reason=reason,
+        )
+        db.add(request)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if db.get(models.SupplierSwitch, payload.request_id):
+            raise HTTPException(409, "Supplier-switch request ID already exists") from None
+        raise
+    except (HTTPException, SQLAlchemyError):
+        db.rollback()
+        raise
+    return request
+
+
+def add_reading(
+    db: Session, payload: schemas.ReadingCreate, *, commit: bool = True
+) -> models.MeterReading:
     meter = db.get(models.Meter, payload.meter_id)
     if meter is None:
         raise HTTPException(status_code=404, detail="Meter does not exist")
@@ -48,8 +109,11 @@ def add_reading(db: Session, payload: schemas.ReadingCreate) -> models.MeterRead
         status=status,
     )
     db.add(reading)
-    db.commit()
-    db.refresh(reading)
+    if commit:
+        db.commit()
+        db.refresh(reading)
+    else:
+        db.flush()
     return reading
 
 

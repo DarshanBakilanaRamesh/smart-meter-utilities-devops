@@ -4,3 +4,7 @@ __pycache__/
 .ruff_cache/
 *.pyc
 utilities.db
+*.db
+*.db-*
+*.db.*.bak
+.env
