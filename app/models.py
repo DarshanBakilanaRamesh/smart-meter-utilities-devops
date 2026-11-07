@@ -18,6 +18,21 @@ class Meter(Base):
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"))
     unit: Mapped[str] = mapped_column(String(10), default="kWh")
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE")
+    current_supplier: Mapped[str] = mapped_column(String(120), default="DEFAULT", server_default="DEFAULT")
+
+
+class SupplierSwitch(Base):
+    __tablename__ = "supplier_switches"
+    request_id: Mapped[str] = mapped_column(String(60), primary_key=True)
+    # Keep submitted identifiers even when the customer or meter does not exist.
+    customer_id: Mapped[str] = mapped_column(String(40))
+    meter_id: Mapped[str] = mapped_column(String(40))
+    old_supplier: Mapped[str] = mapped_column(String(120))
+    new_supplier: Mapped[str] = mapped_column(String(120))
+    requested_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20))
+    rejection_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class MeterReading(Base):

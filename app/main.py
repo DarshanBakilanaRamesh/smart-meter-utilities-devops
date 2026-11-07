@@ -1,10 +1,16 @@
 from fastapi import Depends, FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from sqlalchemy import func, select
+from pydantic import ValidationError
+from sqlalchemy import func, inspect, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from app import models, schemas, services
 from app.database import Base, engine, get_db
 
+if inspect(engine).has_table("meters") and "current_supplier" not in {
+    column["name"] for column in inspect(engine).get_columns("meters")
+}:
+    raise RuntimeError("Existing database needs migration: run python -m app.migrate_supplier_switches")
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Smart Meter Utilities DevOps Platform", version="1.0.0")
 
@@ -58,6 +64,19 @@ def create_reading(payload: schemas.ReadingCreate, db: Session = Depends(get_db)
             raise
 
 
+@app.post("/supplier-switches", response_model=schemas.SupplierSwitchResponse, status_code=201)
+def create_supplier_switch(payload: schemas.SupplierSwitchCreate, db: Session = Depends(get_db)):
+    return services.switch_supplier(db, payload)
+
+
+@app.get("/supplier-switches/{request_id}", response_model=schemas.SupplierSwitchResponse)
+def get_supplier_switch(request_id: str, db: Session = Depends(get_db)):
+    request = db.get(models.SupplierSwitch, request_id)
+    if request is None:
+        raise HTTPException(404, "Supplier-switch request does not exist")
+    return request
+
+
 @app.post("/bills/calculate/{meter_id}", response_model=schemas.BillResponse)
 def bill(meter_id: str, db: Session = Depends(get_db)):
     with LATENCY.labels("billing").time():
@@ -84,26 +103,54 @@ def process_idoc(payload: schemas.IdocMessage, db: Session = Depends(get_db)):
         status="RECEIVED",
     )
     db.add(message)
-    db.commit()
-
-    meter_segment = next((s for s in payload.segments if s.segment_type == "ZMETER"), None)
-    if not meter_segment or not meter_segment.meter_id or meter_segment.reading is None or not meter_segment.reading_date:
-        message.status = "FAILED"
-        message.error_message = "Required ZMETER segment fields are missing"
+    try:
         db.commit()
-        MESSAGES.labels("FAILED").inc()
-        raise HTTPException(422, message.error_message)
+    except IntegrityError:
+        db.rollback()
+        if db.get(models.MarketMessage, control.document_number):
+            raise HTTPException(409, "Transaction already processed") from None
+        raise
 
-    services.add_reading(
-        db,
-        schemas.ReadingCreate(
+    try:
+        meter_segment = next((s for s in payload.segments if s.segment_type == "ZMETER"), None)
+        if (
+            not meter_segment or not meter_segment.meter_id
+            or meter_segment.reading is None or not meter_segment.reading_date
+        ):
+            raise HTTPException(422, "Required ZMETER segment fields are missing")
+
+        reading = schemas.ReadingCreate(
             meter_id=meter_segment.meter_id,
             reading_date=meter_segment.reading_date,
             reading_value=meter_segment.reading,
-        ),
-    )
-    message.status = "COMPLETED"
-    db.commit()
+        )
+        services.add_reading(db, reading, commit=False)
+        message.status = "COMPLETED"
+        db.commit()
+    except (HTTPException, ValidationError, SQLAlchemyError) as exc:
+        # Undo the reading and reset the session before saving the failure.
+        db.rollback()
+        if isinstance(exc, HTTPException):
+            error = exc
+        elif isinstance(exc, ValidationError):
+            detail = "; ".join(
+                f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+                for item in exc.errors()
+            )
+            error = HTTPException(422, f"Invalid meter reading: {detail}")
+        else:
+            error = HTTPException(500, "Database error while processing meter reading")
+        message.status = "FAILED"
+        message.error_message = str(error.detail)[:255]
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise
+        MESSAGES.labels("FAILED").inc()
+        if error is exc:
+            raise
+        raise error from exc
     MESSAGES.labels("COMPLETED").inc()
     return schemas.MessageAck(
         transaction_id=message.transaction_id,

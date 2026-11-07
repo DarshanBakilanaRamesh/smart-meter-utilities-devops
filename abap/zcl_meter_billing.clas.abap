@@ -65,20 +65,30 @@ CLASS zcl_meter_billing IMPLEMENTATION.
       iv_current_reading  = iv_current_reading ).
 
     IF ls_validation-valid = abap_false.
-      RAISE EXCEPTION TYPE cx_sy_illegal_argument
-        EXPORTING
-          textid = cx_sy_illegal_argument=>illegal_argument.
+      RAISE EXCEPTION TYPE cx_sy_illegal_argument.
     ENDIF.
 
     rs_bill-previous_reading = iv_previous_reading.
     rs_bill-current_reading = iv_current_reading.
     rs_bill-consumption_kwh = iv_current_reading - iv_previous_reading.
-    rs_bill-energy_amount = rs_bill-consumption_kwh * iv_price_per_kwh.
+    " Commercial rounding matches Python Decimal ROUND_HALF_UP.
+    rs_bill-energy_amount = round(
+      val = rs_bill-consumption_kwh * iv_price_per_kwh
+      dec = 2
+      mode = cl_abap_math=>round_half_up ).
     rs_bill-basic_charge = iv_basic_charge.
-    rs_bill-vat_amount =
-      ( rs_bill-energy_amount + rs_bill-basic_charge ) * iv_vat_rate.
-    rs_bill-total_amount =
-      rs_bill-energy_amount + rs_bill-basic_charge + rs_bill-vat_amount.
+    DATA(lv_subtotal) = round(
+      val = rs_bill-energy_amount + rs_bill-basic_charge
+      dec = 2
+      mode = cl_abap_math=>round_half_up ).
+    rs_bill-vat_amount = round(
+      val = lv_subtotal * iv_vat_rate
+      dec = 2
+      mode = cl_abap_math=>round_half_up ).
+    rs_bill-total_amount = round(
+      val = lv_subtotal + rs_bill-vat_amount
+      dec = 2
+      mode = cl_abap_math=>round_half_up ).
     rs_bill-status = 'CREATED'.
   ENDMETHOD.
 ENDCLASS.
